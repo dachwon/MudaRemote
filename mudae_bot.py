@@ -39,6 +39,7 @@ COLORS = {
     "ERROR": "\033[91m",    # Red
     "CHECK": "\033[95m",    # Magenta
     "RESET": "\033[36m",    # Cyan
+    "SCHEDULE": "\033[96m", # Novo: Ciano para logs de agendamento
     "ENDC": "\033[0m"      # End Color
 }
 
@@ -70,6 +71,33 @@ def print_log(message, preset_name, log_type="INFO"):
     log_message_formatted = color_log(message, preset_name, log_type)
     write_log_to_file(log_message_formatted)
 
+# NOVO: Função para verificar se está no horário agendado
+def is_in_schedule(client):
+    """
+    Verifica se o horário atual está no intervalo definido no preset.
+    Assume horário local (datetime.now()). Para overnight, ajusta logicamente.
+    """
+    now = datetime.datetime.now().time()
+    start_str = getattr(client, 'start_time', '00:00')
+    end_str = getattr(client, 'end_time', '23:59')
+    start = datetime.datetime.strptime(start_str, "%H:%M").time()
+    end = datetime.datetime.strptime(end_str, "%H:%M").time()
+    
+    if start <= end:
+        in_window = start <= now <= end
+    else:  # Overnight (ex: 22:00 a 02:00)
+        in_window = now >= start or now <= end
+    
+    return in_window
+
+# NOVO: Função auxiliar para calcular segundos até o próximo início do agendamento
+def seconds_to_next_start(start_str):
+    now = datetime.datetime.now()
+    start_today = now.replace(hour=int(start_str[:2]), minute=int(start_str[3:]), second=0, microsecond=0)
+    if now > start_today:
+        start_today += datetime.timedelta(days=1)
+    return (start_today - now).total_seconds()
+
 def is_character_embed(embed):
     """
     Positively identifies if an embed is a character roll using the most reliable structural check.
@@ -97,7 +125,8 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
             enable_reactive_self_snipe_preset, rolling_enabled,
             kakera_reaction_snipe_mode_preset, kakera_reaction_snipe_delay_preset,
             humanization_enabled, humanization_window_minutes, humanization_inactivity_seconds,
-            dk_power_management, skip_initial_commands):
+            dk_power_management, skip_initial_commands,  # NOVO: Parâmetros para agendamento
+            start_time="00:00", end_time="23:59"):  # NOVO: Padrão 24/7
 
     client = commands.Bot(command_prefix=prefix, chunk_guilds_at_startup=False, self_bot=True)
 
@@ -141,6 +170,11 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
     # NEW: DK Power Management setting
     client.dk_power_management = dk_power_management
     client.skip_initial_commands = skip_initial_commands
+
+    # NOVO: Configurações de agendamento
+    client.start_time = start_time
+    client.end_time = end_time
+    log_function(f"[{client.muda_name}] Agendamento: {start_time} a {end_time} (fora: inativo para ações)", preset_name, "SCHEDULE")
 
     async def health_monitor_task():
         """Monitors gateway connection and forces a restart if disconnected for too long."""
@@ -223,6 +257,15 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
         log_function(f"[{client.muda_name}] Initial delay: {start_delay}s...", preset_name, "INFO")
         await asyncio.sleep(start_delay)
 
+        # NOVO: Verificação de agendamento após delay inicial
+        if not is_in_schedule(client):
+            secs_to_start = seconds_to_next_start(client.start_time)
+            next_start = datetime.datetime.now() + datetime.timedelta(seconds=secs_to_start)
+            log_function(f"[{client.muda_name}] Fora do agendamento. Dormindo até {client.start_time} de amanhã (~{secs_to_start/3600:.1f}h). Próximo: {next_start.strftime('%H:%M:%S')}", preset_name, "SCHEDULE")
+            await asyncio.sleep(secs_to_start)
+
+        log_function(f"[{client.muda_name}] Ativado por agendamento. Iniciando...", preset_name, "SCHEDULE")
+
         if client.rolling_enabled:
             try:
                 if client.skip_initial_commands:
@@ -284,6 +327,14 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
 
     async def check_status(client, channel, mudae_prefix):
         """Checks the user's status ($tu) to determine claim and roll availability."""
+        # NOVO: Verificação de agendamento no início de check_status
+        if not is_in_schedule(client):
+            secs_to_start = seconds_to_next_start(client.start_time)
+            next_start = datetime.datetime.now() + datetime.timedelta(seconds=secs_to_start)
+            log_function(f"[{client.muda_name}] Fora do agendamento durante check_status. Dormindo até {client.start_time} (~{secs_to_start/3600:.1f}h). Próximo: {next_start.strftime('%H:%M:%S')}", preset_name, "SCHEDULE")
+            await asyncio.sleep(secs_to_start)
+            log_function(f"[{client.muda_name}] Agendamento iniciado. Prosseguindo com $tu...", preset_name, "SCHEDULE")
+
         log_function(f"[{client.muda_name}] Checking $tu (rolling enabled)...", client.preset_name, "CHECK")
         error_count = 0; max_retries = 5
         tu_message_content = None
@@ -468,6 +519,14 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
 
     async def start_roll_commands(client, channel, rolls_left, ignore_limit_for_post_roll, key_mode_only_kakera_for_post_roll):
         """Starts sending roll commands and initiates post-roll processing."""
+        # NOVO: Verificação de agendamento antes de rolls
+        if not is_in_schedule(client):
+            log_function(f"[{client.muda_name}] Fora do agendamento. Pulando {rolls_left} rolls.", preset_name, "SCHEDULE")
+            # Recalcula status após pular
+            await asyncio.sleep(5)
+            await check_status(client, channel, client.mudae_prefix)
+            return
+
         log_text = f"Starting {rolls_left} rolls"
         if client.enable_reactive_self_snipe: log_text += " (Reactive Snipe ON)"
         else: log_text += " (Reactive Snipe OFF)"
@@ -736,6 +795,13 @@ def run_bot(token, prefix, target_channel_id, roll_command, min_kakera, delay_se
         if message.author.id != TARGET_BOT_ID or message.channel.id != client.target_channel_id:
             if client.rolling_enabled: await client.process_commands(message)
             return
+
+        # NOVO: Verificação de agendamento no on_message (para snipes)
+        if not is_in_schedule(client):
+            # Ainda processa comandos se rolling_enabled, mas ignora snipes
+            if client.rolling_enabled: await client.process_commands(message)
+            return
+
         if not message.embeds: return
         embed = message.embeds[0]
         
@@ -874,6 +940,10 @@ def bot_lifecycle_wrapper(preset_name, preset_data):
     # NEW: Load Skip Initial Commands setting
     skip_initial_commands_p = preset_data.get("skip_initial_commands", False)
 
+    # NOVO: Carrega configurações de agendamento (padrão 24/7)
+    start_time_p = preset_data.get("start_time", "00:00")
+    end_time_p = preset_data.get("end_time", "23:59")
+
     restart_delay = 60 # Seconds to wait before restarting a bot instance
     while True:
         try:
@@ -887,7 +957,8 @@ def bot_lifecycle_wrapper(preset_name, preset_data):
                 enable_reactive_self_snipe_preset, rolling_enabled_preset,
                 kakera_reaction_snipe_mode_p, kakera_reaction_snipe_delay_p,
                 humanization_enabled_p, humanization_window_p, humanization_inactivity_p,
-                dk_power_management_p, skip_initial_commands_p
+                dk_power_management_p, skip_initial_commands_p,
+                start_time_p, end_time_p  # NOVO: Passa para run_bot
             )
             print_log(f"Bot instance for '{preset_name}' has stopped normally. Restarting in {restart_delay} seconds...", preset_name, "RESET")
         except Exception as e:
@@ -955,6 +1026,11 @@ def validate_preset(preset_name, preset_data):
     # NEW: Validate Skip Initial Commands key
     if "skip_initial_commands" in preset_data and not isinstance(preset_data["skip_initial_commands"], bool):
         print(f"\033[91mWarn in preset '{preset_name}': 'skip_initial_commands' should be a boolean.\033[0m")
+    # NOVO: Validação para agendamento
+    if "start_time" in preset_data and not re.match(r"^\d{2}:\d{2}$", preset_data["start_time"]):
+        print(f"\033[91mWarn in preset '{preset_name}': 'start_time' deve ser no formato HH:MM.\033[0m")
+    if "end_time" in preset_data and not re.match(r"^\d{2}:\d{2}$", preset_data["end_time"]):
+        print(f"\033[91mWarn in preset '{preset_name}': 'end_time' deve ser no formato HH:MM.\033[0m")
     return True
 
 def main_menu():
