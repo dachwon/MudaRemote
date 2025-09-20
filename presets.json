@@ -26,7 +26,9 @@
     "humanization_enabled": true,
     "humanization_window_minutes": 30,
     "humanization_inactivity_seconds": 5,
-    "dk_power_management": true
+    "dk_power_management": true,
+    "start_time": "12:00",
+    "end_time": "18:00"
   },
   "Preset_2_Kakera_Focus_KeyMode": {
     "token": "YOUR_DISCORD_TOKEN_2",
